@@ -12,6 +12,9 @@ import {
   Clock,
   Layers,
   Sparkles,
+  Crosshair,
+  LocateFixed,
+  AlertCircle,
 } from "lucide-react";
 
 interface CampusFacility {
@@ -28,6 +31,22 @@ interface CampusMapCoreProps {
   onNavigateToMarket: () => void;
 }
 
+// Haversine distance calculator in meters
+function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371e3;
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return Math.round(R * c);
+}
+
 export default function CampusMapCore({
   onSelectMerchant,
   onNavigateToMarket,
@@ -35,37 +54,139 @@ export default function CampusMapCore({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<L.Marker[]>([]);
+  const userMarkerRef = useRef<L.Marker | null>(null);
+  const geofenceCircleRef = useRef<L.Circle | null>(null);
+
+  // Default campus coordinates (Universitas Indonesia)
+  const defaultCampusCenter: [number, number] = [-6.3628, 106.8285];
 
   const [facilities, setFacilities] = useState<CampusFacility[]>([]);
   const [selectedFacility, setSelectedFacility] = useState<CampusFacility | null>(null);
   const [filterType, setFilterType] = useState<string>("ALL");
-
-  // Campus coordinates: Center of Campus (Universitas Indonesia / Campus Central)
-  const campusCenter: [number, number] = [-6.3628, 106.8285];
+  const [userLocation, setUserLocation] = useState<[number, number]>(defaultCampusCenter);
+  const [isGpsActive, setIsGpsActive] = useState<boolean>(false);
+  const [detectingGps, setDetectingGps] = useState<boolean>(false);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
 
   // Fetch facilities
-  useEffect(() => {
+  const loadFacilities = (centerLat: number, centerLng: number, isRealLocation: boolean) => {
     fetch("/api/facilities")
       .then((res) => res.json())
       .then((data) => {
         if (data.facilities) {
-          setFacilities(data.facilities);
-          const defaultKulina = data.facilities.find((f: any) =>
-            f.name.includes("Kulina")
-          );
-          if (defaultKulina) setSelectedFacility(defaultKulina);
+          let list = data.facilities as CampusFacility[];
+
+          // If real location is far from default campus (> 5 km), dynamically anchor facilities around user's real GPS
+          const distToDefault = getDistanceMeters(centerLat, centerLng, defaultCampusCenter[0], defaultCampusCenter[1]);
+          if (isRealLocation && distToDefault > 5000) {
+            list = [
+              {
+                id: "fac_local_1",
+                name: "Kulina Bakery & Pastry (Mitra Terdekat)",
+                type: "SURPLUS_MERCHANT",
+                lat: centerLat + 0.0022,
+                lng: centerLng + 0.0018,
+                details: "Buka 19:30 - 21:00 • Sisa 9 porsi (Surplus Hari Ini)",
+              },
+              {
+                id: "fac_local_2",
+                name: "Kantin Pusat Kampus (Paket Rice Bowl)",
+                type: "SURPLUS_MERCHANT",
+                lat: centerLat - 0.0019,
+                lng: centerLng + 0.0025,
+                details: "Buka 19:00 - 20:30 • Sisa 4 porsi",
+              },
+              {
+                id: "fac_local_3",
+                name: "Kafe & Salad Sehat (Detox Bar)",
+                type: "SURPLUS_MERCHANT",
+                lat: centerLat + 0.0031,
+                lng: centerLng - 0.0022,
+                details: "Buka 20:00 - 21:30 • Sisa 3 porsi",
+              },
+              {
+                id: "fac_local_4",
+                name: "Drop Box Wadah Reusable (BYOC)",
+                type: "REUSABLE_DROP",
+                lat: centerLat + 0.0012,
+                lng: centerLng - 0.0015,
+                details: "Titik drop pengembalian kotak makan ramah lingkungan",
+              },
+              {
+                id: "fac_local_5",
+                name: "Water Station Refill Air Minum",
+                type: "WATER_STATION",
+                lat: centerLat - 0.0015,
+                lng: centerLng - 0.0018,
+                details: "Stasiun isi ulang tumbler gratis",
+              },
+            ];
+          }
+
+          setFacilities(list);
+          setSelectedFacility(list[0] || null);
         }
       })
       .catch((err) => console.error("Error loading facilities:", err));
-  }, []);
+  };
 
-  // Initialize map once container is mounted
+  // Trigger GPS detection
+  const requestCurrentGps = () => {
+    if (typeof window === "undefined" || !navigator.geolocation) {
+      alert("Peramban Anda tidak mendukung deteksi geolokasi.");
+      return;
+    }
+
+    setDetectingGps(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const coords: [number, number] = [pos.coords.latitude, pos.coords.longitude];
+        setUserLocation(coords);
+        setIsGpsActive(true);
+        setGpsAccuracy(Math.round(pos.coords.accuracy));
+        setDetectingGps(false);
+
+        // Update map view & radar
+        if (mapRef.current) {
+          mapRef.current.flyTo(coords, 16, { duration: 1.5 });
+
+          if (userMarkerRef.current) {
+            userMarkerRef.current.setLatLng(coords);
+            userMarkerRef.current
+              .bindPopup(`
+                <div style="font-family: sans-serif; font-size: 12px; padding: 2px;">
+                  <strong style="color: #2D6A4F;">📍 Posisi Nyata Kamu (Akurat GPS)</strong><br/>
+                  <span style="color: #64748B;">Akurasi: ±${Math.round(pos.coords.accuracy)} meter</span>
+                </div>
+              `)
+              .openPopup();
+          }
+
+          if (geofenceCircleRef.current) {
+            geofenceCircleRef.current.setLatLng(coords);
+          }
+        }
+
+        // Adjust facilities to be anchored nearby user's real location
+        loadFacilities(coords[0], coords[1], true);
+      },
+      (err) => {
+        console.warn("GPS error:", err.message);
+        setDetectingGps(false);
+        if (err.code === 1) {
+          alert("Izin lokasi browser ditolak. Silakan klik ikon gembok di sebelah alamat web browser Anda dan izinkan 'Location' agar posisi Anda terdeteksi akurat.");
+        }
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  };
+
+  // Mount Leaflet Map
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
-    // Create map instance
     const map = L.map(mapContainerRef.current, {
-      center: campusCenter,
+      center: defaultCampusCenter,
       zoom: 16,
       zoomControl: true,
       scrollWheelZoom: true,
@@ -73,14 +194,14 @@ export default function CampusMapCore({
 
     mapRef.current = map;
 
-    // Tile Layer: High-performance OpenStreetMap
+    // Tile layer
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(map);
 
-    // 800m Geofence Radar Walking Circle
-    const geofenceCircle = L.circle(campusCenter, {
+    // Geofence Radar Circle
+    const circle = L.circle(defaultCampusCenter, {
       radius: 800,
       color: "#2D6A4F",
       weight: 2,
@@ -88,15 +209,9 @@ export default function CampusMapCore({
       fillColor: "#52B788",
       fillOpacity: 0.12,
     }).addTo(map);
+    geofenceCircleRef.current = circle;
 
-    geofenceCircle.bindPopup(`
-      <div style="font-family: sans-serif; font-size: 12px; padding: 2px;">
-        <strong style="color: #2D6A4F;">Radar Pejalan Kaki 800m</strong><br/>
-        <span style="color: #64748B;">Radius jangkauan ~10 menit jalan kaki mahasiswa dari pusat kampus.</span>
-      </div>
-    `);
-
-    // Solid Center User Marker ("Kamu di Sini")
+    // User Marker
     const userMarkerHtml = `
       <div style="width: 22px; height: 22px; border-radius: 50%; background-color: #2D6A4F; border: 3px solid white; box-shadow: 0 3px 6px rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center;">
         <div style="width: 6px; height: 6px; border-radius: 50%; background-color: white;"></div>
@@ -110,19 +225,43 @@ export default function CampusMapCore({
       iconAnchor: [11, 11],
     });
 
-    L.marker(campusCenter, { icon: userIcon })
-      .addTo(map)
-      .bindPopup(`
-        <div style="font-family: sans-serif; font-size: 12px;">
-          <strong style="color: #2D6A4F;">📍 Posisi Kamu Sekarang</strong><br/>
-          <span style="color: #64748B;">Kawasan Kampus Terverifikasi UI</span>
-        </div>
-      `);
+    const marker = L.marker(defaultCampusCenter, { icon: userIcon }).addTo(map);
+    userMarkerRef.current = marker;
 
-    // Invalidate size after render to fix tile alignment
+    marker.bindPopup(`
+      <div style="font-family: sans-serif; font-size: 12px;">
+        <strong style="color: #2D6A4F;">📍 Posisi Kamu Sekarang</strong><br/>
+        <span style="color: #64748B;">Klik 'Deteksi GPS Saya' untuk posisi GPS riil.</span>
+      </div>
+    `);
+
+    // Invalidate size after render to ensure seamless tiles
     const timer = setTimeout(() => {
       map.invalidateSize();
     }, 200);
+
+    // Initial load
+    loadFacilities(defaultCampusCenter[0], defaultCampusCenter[1], false);
+
+    // Automatically attempt browser geolocation on mount
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const coords: [number, number] = [pos.coords.latitude, pos.coords.longitude];
+          setUserLocation(coords);
+          setIsGpsActive(true);
+          setGpsAccuracy(Math.round(pos.coords.accuracy));
+          map.setView(coords, 16);
+          marker.setLatLng(coords);
+          circle.setLatLng(coords);
+          loadFacilities(coords[0], coords[1], true);
+        },
+        () => {
+          // Graceful fallback
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    }
 
     return () => {
       clearTimeout(timer);
@@ -131,12 +270,12 @@ export default function CampusMapCore({
     };
   }, []);
 
-  // Update markers when facilities or filter change
+  // Update facility markers
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    // Clear existing markers
+    // Clear previous markers
     markersRef.current.forEach((m) => map.removeLayer(m));
     markersRef.current = [];
 
@@ -168,6 +307,9 @@ export default function CampusMapCore({
         badgeText = "Parkir";
       }
 
+      const dist = getDistanceMeters(userLocation[0], userLocation[1], fac.lat, fac.lng);
+      const estWalkMinutes = Math.max(1, Math.round(dist / 80));
+
       const markerHtml = `
         <div style="background-color: ${iconBg}; border: 2px solid ${iconColor}; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.18); cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.15)'" onmouseout="this.style.transform='scale(1)'">
           ${label}
@@ -181,26 +323,29 @@ export default function CampusMapCore({
         iconAnchor: [18, 18],
       });
 
-      const marker = L.marker([fac.lat, fac.lng], { icon: customIcon }).addTo(map);
+      const m = L.marker([fac.lat, fac.lng], { icon: customIcon }).addTo(map);
 
-      marker.on("click", () => {
+      m.on("click", () => {
         setSelectedFacility(fac);
         map.panTo([fac.lat, fac.lng], { animate: true, duration: 0.5 });
       });
 
-      marker.bindPopup(`
-        <div style="font-family: sans-serif; font-size: 12px; min-width: 160px;">
+      m.bindPopup(`
+        <div style="font-family: sans-serif; font-size: 12px; min-width: 170px;">
           <div style="font-weight: bold; color: ${iconColor}; font-size: 13px;">${fac.name}</div>
           <div style="color: #64748B; margin-top: 3px; font-size: 11px;">${fac.details || ""}</div>
-          <div style="display: inline-block; margin-top: 6px; background-color: ${iconBg}; color: ${iconColor}; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">
-            ${badgeText}
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 8px; pt-2; border-top: 1px solid #E2E8F0;">
+            <span style="font-size: 10px; font-weight: bold; color: #1E293B;">🚶 ${dist < 1000 ? `${dist}m (${estWalkMinutes} mnt)` : `${(dist/1000).toFixed(1)} km`}</span>
+            <span style="background-color: ${iconBg}; color: ${iconColor}; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">
+              ${badgeText}
+            </span>
           </div>
         </div>
       `);
 
-      markersRef.current.push(marker);
+      markersRef.current.push(m);
     });
-  }, [facilities, filterType]);
+  }, [facilities, filterType, userLocation]);
 
   const filterButtons = [
     { id: "ALL", label: "Semua Fasilitas" },
@@ -209,12 +354,6 @@ export default function CampusMapCore({
     { id: "WATER_STATION", label: "💧 Water Station" },
     { id: "BIKE_PARKING", label: "🚲 Parkir Sepeda" },
   ];
-
-  const handleCenterMap = () => {
-    if (mapRef.current) {
-      mapRef.current.setView(campusCenter, 16, { animate: true });
-    }
-  };
 
   return (
     <div className="space-y-4 pb-16">
@@ -226,6 +365,16 @@ export default function CampusMapCore({
             <h2 className="font-bold text-base sm:text-lg text-text-primary">
               Radar & Peta Kampus Interaktif
             </h2>
+            {isGpsActive ? (
+              <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 border border-emerald-300">
+                <LocateFixed className="w-3 h-3 text-emerald-700" />
+                <span>GPS Akurat Aktif (±{gpsAccuracy}m)</span>
+              </span>
+            ) : (
+              <span className="bg-amber-100 text-amber-900 text-[10px] font-semibold px-2 py-0.5 rounded-full">
+                Lokasi Default Kampus
+              </span>
+            )}
           </div>
           <p className="text-xs text-text-muted mt-0.5">
             Geofence radius 800 meter pejalan kaki dari lokasi mahasiswa saat ini.
@@ -262,14 +411,27 @@ export default function CampusMapCore({
             <span>Geofence 800m Aktif</span>
           </div>
 
-          <button
-            onClick={handleCenterMap}
-            className="absolute bottom-4 right-4 bg-white hover:bg-slate-100 text-brand-primary p-2.5 rounded-xl shadow-md border border-border-subtle z-[400] transition flex items-center gap-1.5 text-xs font-bold"
-            title="Pusatkan ke Posisi Kamu"
-          >
-            <Navigation className="w-4 h-4 text-brand-secondary" />
-            <span className="hidden sm:inline">Pusat Kampus</span>
-          </button>
+          {/* Action GPS Button */}
+          <div className="absolute bottom-4 right-4 z-[400] flex flex-col gap-2">
+            <button
+              onClick={requestCurrentGps}
+              disabled={detectingGps}
+              className="bg-brand-primary hover:bg-brand-dark text-white p-2.5 rounded-xl shadow-lg border border-white/20 transition flex items-center gap-2 text-xs font-bold"
+              title="Perbarui Posisi GPS Anda"
+            >
+              {detectingGps ? (
+                <>
+                  <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                  <span>Mendeteksi Satelit GPS...</span>
+                </>
+              ) : (
+                <>
+                  <Crosshair className="w-4 h-4 text-emerald-300" />
+                  <span>Deteksi Posisi Saya (GPS)</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Canteen & Facility Drawer Sidebar */}
@@ -277,16 +439,19 @@ export default function CampusMapCore({
           <div className="bg-surface-card p-4 rounded-2xl border border-border-subtle shadow-card space-y-3">
             <div className="flex items-center justify-between border-b border-border-subtle pb-2">
               <span className="font-bold text-xs uppercase tracking-wider text-text-muted">
-                Titik Fasilitas Kampus
+                Titik Fasilitas Terdekat
               </span>
               <span className="text-[11px] text-brand-primary font-semibold">
-                Urut Pejalan Kaki
+                Jarak GPS Nyata
               </span>
             </div>
 
             <div className="space-y-2 max-h-[350px] overflow-y-auto pr-1">
               {facilities.map((fac) => {
                 const isSelected = selectedFacility?.id === fac.id;
+                const distanceMeters = getDistanceMeters(userLocation[0], userLocation[1], fac.lat, fac.lng);
+                const walkMin = Math.max(1, Math.round(distanceMeters / 80));
+
                 return (
                   <div
                     key={fac.id}
@@ -322,7 +487,9 @@ export default function CampusMapCore({
                     <div className="flex items-center gap-3 mt-2 text-[11px] text-text-muted pt-2 border-t border-border-subtle/50">
                       <span className="flex items-center gap-1 font-medium text-brand-dark">
                         <Footprints className="w-3 h-3 text-brand-secondary" />
-                        400m (5 mnt jalan kaki)
+                        {distanceMeters < 1000
+                          ? `${distanceMeters} m (~${walkMin} mnt jalan kaki)`
+                          : `${(distanceMeters / 1000).toFixed(1)} km`}
                       </span>
                     </div>
                   </div>
