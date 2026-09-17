@@ -148,7 +148,12 @@ export default function CampusMapCore({
 
         // Update map view & radar
         if (mapRef.current) {
-          mapRef.current.flyTo(coords, 16, { duration: 1.5 });
+          const activeMap = mapRef.current;
+          try {
+            if (activeMap.getContainer() && (activeMap as any)._mapPane) {
+              activeMap.flyTo(coords, 16, { duration: 1.5 });
+            }
+          } catch (e) {}
 
           if (userMarkerRef.current) {
             userMarkerRef.current.setLatLng(coords);
@@ -184,6 +189,7 @@ export default function CampusMapCore({
   // Mount Leaflet Map
   useEffect(() => {
     if (!mapContainerRef.current) return;
+    let isMounted = true;
 
     const map = L.map(mapContainerRef.current, {
       center: defaultCampusCenter,
@@ -231,30 +237,41 @@ export default function CampusMapCore({
     marker.bindPopup(`
       <div style="font-family: sans-serif; font-size: 12px;">
         <strong style="color: #2D6A4F;">📍 Posisi Kamu Sekarang</strong><br/>
-        <span style="color: #64748B;">Klik 'Deteksi GPS Saya' untuk posisi GPS riil.</span>
+        <span style="color: #64748B;">Klik 'Deteksi Posisi Saya (GPS)' untuk sinkronisasi satelit.</span>
       </div>
     `);
 
     // Invalidate size after render to ensure seamless tiles
     const timer = setTimeout(() => {
-      map.invalidateSize();
-    }, 200);
+      if (isMounted && mapRef.current) {
+        try {
+          mapRef.current.invalidateSize();
+        } catch (e) {}
+      }
+    }, 250);
 
     // Initial load
     loadFacilities(defaultCampusCenter[0], defaultCampusCenter[1], false);
 
-    // Automatically attempt browser geolocation on mount
-    if (navigator.geolocation) {
+    // Automatically attempt browser geolocation on mount with isMounted guards
+    if (typeof window !== "undefined" && navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const coords: [number, number] = [pos.coords.latitude, pos.coords.longitude];
-          setUserLocation(coords);
-          setIsGpsActive(true);
-          setGpsAccuracy(Math.round(pos.coords.accuracy));
-          map.setView(coords, 16);
-          marker.setLatLng(coords);
-          circle.setLatLng(coords);
-          loadFacilities(coords[0], coords[1], true);
+          if (!isMounted || !mapRef.current) return;
+          const activeMap = mapRef.current;
+          try {
+            if (!activeMap.getContainer() || !(activeMap as any)._mapPane) return;
+            const coords: [number, number] = [pos.coords.latitude, pos.coords.longitude];
+            setUserLocation(coords);
+            setIsGpsActive(true);
+            setGpsAccuracy(Math.round(pos.coords.accuracy));
+            activeMap.setView(coords, 16);
+            if (userMarkerRef.current) userMarkerRef.current.setLatLng(coords);
+            if (geofenceCircleRef.current) geofenceCircleRef.current.setLatLng(coords);
+            loadFacilities(coords[0], coords[1], true);
+          } catch (e) {
+            console.warn("Geolocation position update ignored due to unmounted map:", e);
+          }
         },
         () => {
           // Graceful fallback
@@ -264,9 +281,14 @@ export default function CampusMapCore({
     }
 
     return () => {
+      isMounted = false;
       clearTimeout(timer);
-      map.remove();
-      mapRef.current = null;
+      if (mapRef.current) {
+        try {
+          mapRef.current.remove();
+        } catch (e) {}
+        mapRef.current = null;
+      }
     };
   }, []);
 
