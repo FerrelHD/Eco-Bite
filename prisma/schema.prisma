@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String         @id @default(cuid())
+  email        String         @unique
+  passwordHash String
+  role         String         @default("STUDENT") // STUDENT, MERCHANT, ADMIN
+  name         String
+  nim          String?
+  faculty      String?
+  ecoPoints    Int            @default(0)
+  avatarUrl    String?
+  merchants    Merchant[]
+  orders       Order[]
+  impactLogs   EcoImpactLog[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+}
+
+model Merchant {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storeName      String
+  location       String        // e.g. "Gedung Vokasi Lt. 1"
+  faculty        String        // e.g. "Vokasi"
+  isOpen         Boolean       @default(true)
+  isVerified     Boolean       @default(true)
+  greenTier      String        @default("GOLD") // GOLD, SILVER, BRONZE
+  bannerUrl      String?
+  coordinatesLat Float
+  coordinatesLng Float
+  items          SurplusItem[]
+  orders         Order[]
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+}
+
+model SurplusItem {
+  id              String      @id @default(cuid())
+  merchantId      String
+  merchant        Merchant    @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  name            String
+  description     String
+  category        String      @default("BAKERY") // BAKERY, RICE_MAINS, CAFE_COFFEE, HEALTHY_SALAD
+  originalPrice   Int
+  discountedPrice Int
+  stockQuantity   Int
+  version         Int         @default(1) // For optimistic locking
+  pickupStart     String      // e.g. "19:30"
+  pickupEnd       String      // e.g. "21:00"
+  byocBonusPoints Int         @default(50)
+  imageUrl        String
+  status          String      @default("AVAILABLE") // AVAILABLE, SOLD_OUT, INACTIVE
+  orders          Order[]
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+}
+
+model Order {
+  id            String        @id @default(cuid())
+  orderNumber   String        @unique // e.g. "#EB-88492"
+  userId        String
+  user          User          @relation(fields: [userId], references: [id])
+  merchantId    String
+  merchant      Merchant      @relation(fields: [merchantId], references: [id])
+  itemId        String
+  item          SurplusItem   @relation(fields: [itemId], references: [id])
+  quantity      Int           @default(1)
+  totalPrice    Int
+  paymentMethod String        @default("QRIS") // QRIS, KAMPUSPAY
+  paymentStatus String        @default("PAID") // PENDING, PAID
+  orderStatus   String        @default("CONFIRMED") // CONFIRMED, READY_FOR_PICKUP, COMPLETED, CANCELLED
+  byocOptIn     Boolean       @default(false)
+  byocVerified  Boolean       @default(false)
+  rescuePass    RescuePass?
+  impactLog     EcoImpactLog?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+model RescuePass {
+  id             String    @id @default(cuid())
+  orderId        String    @unique
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  qrSecret       String
+  dynamicQrToken String
+  expiresAt      DateTime
+  status         String    @default("ACTIVE") // ACTIVE, REDEEMED, EXPIRED
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model EcoImpactLog {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  orderId       String   @unique
+  order         Order    @relation(fields: [orderId], references: [id])
+  foodWeightKg  Float
+  co2SavedKg    Float
+  moneySavedRp  Int
+  pointsAwarded Int
+  createdAt     DateTime @default(now())
+}
+
+model CampusFacility {
+  id        String   @id @default(cuid())
+  name      String
+  type      String   // SURPLUS_MERCHANT, REUSABLE_DROP, BIKE_PARKING, WATER_STATION
+  lat       Float
+  lng       Float
+  details   String?
+  createdAt DateTime @default(now())
+}
